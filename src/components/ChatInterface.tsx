@@ -1,33 +1,114 @@
-import React, { useState } from 'react';
-import { Send, RotateCcw, Wifi, WifiOff } from 'lucide-react';
+import React, { useState, useEffect, useCallback } from 'react';
+import { Send, RotateCcw, Wrench, Loader as Loader2 } from 'lucide-react';
 import { AspectChatColumn } from './AspectChatColumn';
+import { Sidebar } from './Sidebar';
 import { useAspectChat } from '../hooks/useAspectChat';
-import type { AspectResponse } from '../services/api';
+import {
+  getSessions,
+  createSession,
+  deleteSession,
+  getModelConfigs,
+  getAspects,
+  getToolDefinitions,
+  getConnections,
+  updateAspect,
+} from '../services/api';
+import type {
+  Session,
+  ModelConfig,
+  AspectConfig,
+  ToolDefinition,
+  Connection,
+  AspectResponse,
+} from '../services/types';
 
 export function ChatInterface() {
+  const [sessions, setSessions] = useState<Session[]>([]);
+  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
+  const [models, setModels] = useState<ModelConfig[]>([]);
+  const [aspects, setAspects] = useState<AspectConfig[]>([]);
+  const [tools, setTools] = useState<ToolDefinition[]>([]);
+  const [connections, setConnections] = useState<Connection[]>([]);
   const [inputMessage, setInputMessage] = useState('');
-  const { messages, isLoading, error, sendMessage, clearChat } = useAspectChat();
-  const [isOnline, setIsOnline] = useState(true);
+  const [toolCallingEnabled, setToolCallingEnabled] = useState(true);
+  const [loadingData, setLoadingData] = useState(true);
 
-  // Check backend connectivity
-  React.useEffect(() => {
-    const checkConnection = async () => {
-      try {
-        const response = await fetch('http://localhost:8000/health');
-        setIsOnline(response.ok);
-      } catch {
-        setIsOnline(false);
+  const { messages, isLoading, error, sendMessage, clearChat } = useAspectChat(
+    currentSessionId,
+    models,
+    aspects,
+    tools,
+    toolCallingEnabled
+  );
+
+  const loadData = useCallback(async () => {
+    try {
+      const [s, m, a, t, c] = await Promise.all([
+        getSessions(),
+        getModelConfigs(),
+        getAspects(),
+        getToolDefinitions(),
+        getConnections(),
+      ]);
+      setSessions(s);
+      setModels(m);
+      setAspects(a);
+      setTools(t);
+      setConnections(c);
+      if (s.length > 0 && !currentSessionId) {
+        setCurrentSessionId(s[0].id);
       }
-    };
-    
-    checkConnection();
-    const interval = setInterval(checkConnection, 30000); // Check every 30s
-    return () => clearInterval(interval);
-  }, []);
+    } catch (err) {
+      console.error('Failed to load data:', err);
+    } finally {
+      setLoadingData(false);
+    }
+  }, [currentSessionId]);
+
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
+
+  const handleNewSession = async () => {
+    try {
+      const s = await createSession(`Session ${sessions.length + 1}`);
+      setSessions((prev) => [s, ...prev]);
+      setCurrentSessionId(s.id);
+      clearChat();
+    } catch (err) {
+      console.error('Failed to create session:', err);
+    }
+  };
+
+  const handleDeleteSession = async (id: string) => {
+    try {
+      await deleteSession(id);
+      setSessions((prev) => prev.filter((s) => s.id !== id));
+      if (currentSessionId === id) {
+        setCurrentSessionId(null);
+        clearChat();
+      }
+    } catch (err) {
+      console.error('Failed to delete session:', err);
+    }
+  };
+
+  const handleModelChange = async (aspectId: string, modelConfigId: string) => {
+    try {
+      await updateAspect(aspectId, { model_config_id: modelConfigId });
+      setAspects((prev) =>
+        prev.map((a) => (a.id === aspectId ? { ...a, model_config_id: modelConfigId } : a))
+      );
+    } catch (err) {
+      console.error('Failed to update aspect model:', err);
+    }
+  };
 
   const handleSend = async () => {
     if (!inputMessage.trim() || isLoading) return;
-
+    if (!currentSessionId) {
+      await handleNewSession();
+    }
     await sendMessage(inputMessage);
     setInputMessage('');
   };
@@ -39,111 +120,136 @@ export function ChatInterface() {
     }
   };
 
-  // Get responses for each aspect from the latest aspect message
-  const getAspectResponses = (aspect: 'Logic' | 'Creative' | 'Analytical'): AspectResponse[] => {
+  const getAspectResponses = (aspectName: string): AspectResponse[] => {
     return messages
-      .filter(msg => msg.type === 'aspects' && msg.aspects)
-      .flatMap(msg => msg.aspects || [])
-      .filter(response => response.aspect === aspect);
+      .filter((msg) => msg.type === 'aspects' && msg.aspects)
+      .flatMap((msg) => msg.aspects || [])
+      .filter((resp) => resp.aspect === aspectName);
   };
 
+  const enabledAspects = aspects.filter((a) => a.enabled);
+
+  if (loadingData) {
+    return (
+      <div className="h-screen flex items-center justify-center bg-slate-950">
+        <Loader2 className="w-8 h-8 animate-spin text-blue-400" />
+      </div>
+    );
+  }
+
   return (
-    <div className="h-screen flex flex-col bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900">
-      {/* Header */}
-      <div className="bg-white/10 backdrop-blur-md border-b border-white/20 p-4">
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl font-bold text-white">Aspect AI</h1>
-            <p className="text-white/70 text-sm">
-              Multi-perspective AI conversations powered by Hugging Face
-            </p>
-          </div>
-          <div className="flex items-center space-x-3">
-            <div className="flex items-center space-x-2">
-              {isOnline ? (
-                <Wifi className="w-4 h-4 text-green-400" />
-              ) : (
-                <WifiOff className="w-4 h-4 text-red-400" />
-              )}
-              <span className={`text-xs ${isOnline ? 'text-green-400' : 'text-red-400'}`}>
-                {isOnline ? 'Connected' : 'Offline'}
-              </span>
+    <div className="h-screen flex bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
+      <Sidebar
+        sessions={sessions}
+        currentSessionId={currentSessionId}
+        onSelectSession={(id) => {
+          setCurrentSessionId(id);
+          clearChat();
+        }}
+        onNewSession={handleNewSession}
+        onDeleteSession={handleDeleteSession}
+        models={models}
+        aspects={aspects}
+        tools={tools}
+        connections={connections}
+        onDataChange={loadData}
+      />
+
+      <div className="flex-1 flex flex-col">
+        {/* Header */}
+        <div className="bg-slate-900/50 backdrop-blur-md border-b border-slate-700/50 px-6 py-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <h1 className="text-lg font-bold text-white">
+                {sessions.find((s) => s.id === currentSessionId)?.title || 'Aspect AI'}
+              </h1>
+              <p className="text-slate-400 text-xs">
+                {enabledAspects.length} aspects · {models.filter((m) => m.enabled).length} models · {tools.filter((t) => t.enabled).length} tools
+              </p>
             </div>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => setToolCallingEnabled(!toolCallingEnabled)}
+                className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors border ${
+                  toolCallingEnabled
+                    ? 'bg-amber-500/10 text-amber-300 border-amber-500/30'
+                    : 'bg-slate-800 text-slate-400 border-slate-700'
+                }`}
+              >
+                <Wrench className="w-3.5 h-3.5" />
+                Tools {toolCallingEnabled ? 'ON' : 'OFF'}
+              </button>
+              <button
+                onClick={clearChat}
+                className="flex items-center gap-2 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-slate-300 text-xs transition-colors border border-slate-700"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                Clear
+              </button>
+            </div>
+          </div>
+
+          {error && (
+            <div className="mt-2 p-2 bg-red-500/10 border border-red-500/20 rounded-lg">
+              <p className="text-red-300 text-xs">{error}</p>
+            </div>
+          )}
+        </div>
+
+        {/* Chat Columns */}
+        <div className="flex-1 flex gap-3 p-4 overflow-hidden">
+          {enabledAspects.length > 0 ? (
+            enabledAspects.map((aspect) => (
+              <AspectChatColumn
+                key={aspect.id}
+                aspect={aspect}
+                responses={getAspectResponses(aspect.name)}
+                isLoading={isLoading}
+                models={models}
+                onModelChange={(modelId) => handleModelChange(aspect.id, modelId)}
+              />
+            ))
+          ) : (
+            <div className="flex-1 flex items-center justify-center text-slate-500">
+              <p>No aspects enabled. Create aspects in the sidebar.</p>
+            </div>
+          )}
+        </div>
+
+        {/* Input Area */}
+        <div className="bg-slate-900/50 backdrop-blur-md border-t border-slate-700/50 px-6 py-4">
+          <div className="flex gap-3 max-w-4xl mx-auto">
+            <input
+              type="text"
+              value={inputMessage}
+              onChange={(e) => setInputMessage(e.target.value)}
+              onKeyDown={handleKeyPress}
+              placeholder="Ask a question to get perspectives from all aspects..."
+              className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-transparent disabled:opacity-50 transition-all"
+              disabled={isLoading || !currentSessionId}
+            />
             <button
-              onClick={clearChat}
-              className="flex items-center space-x-2 px-4 py-2 bg-white/10 hover:bg-white/20 rounded-lg border border-white/20 transition-colors"
+              onClick={handleSend}
+              disabled={!inputMessage.trim() || isLoading || !currentSessionId}
+              className="px-6 py-3 bg-gradient-to-r from-blue-500 to-cyan-400 hover:from-blue-600 hover:to-cyan-500 disabled:from-slate-600 disabled:to-slate-600 disabled:cursor-not-allowed rounded-lg text-white font-medium transition-all duration-200 flex items-center gap-2 min-w-[100px]"
             >
-              <RotateCcw className="w-4 h-4" />
-              <span className="text-sm">Clear</span>
+              {isLoading ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <span>Sending</span>
+                </>
+              ) : (
+                <>
+                  <Send className="w-4 h-4" />
+                  <span>Send</span>
+                </>
+              )}
             </button>
           </div>
-        </div>
-        
-        {error && (
-          <div className="mt-3 p-3 bg-red-500/20 border border-red-500/30 rounded-lg">
-            <p className="text-red-200 text-sm">{error}</p>
-            {!isOnline && (
-              <p className="text-red-200/70 text-xs mt-1">
-                Make sure the backend server is running on http://localhost:8000
-              </p>
-            )}
+          <div className="flex items-center justify-between mt-2 text-xs text-slate-500 max-w-4xl mx-auto">
+            <span>Press Enter to send, Shift+Enter for new line</span>
+            <span>{messages.filter((m) => m.type === 'user').length} messages sent</span>
           </div>
-        )}
-      </div>
-
-      {/* Chat Columns */}
-      <div className="flex-1 flex">
-        <AspectChatColumn
-          aspect="Logic"
-          responses={getAspectResponses('Logic')}
-          isLoading={isLoading}
-        />
-        <AspectChatColumn
-          aspect="Creative"
-          responses={getAspectResponses('Creative')}
-          isLoading={isLoading}
-        />
-        <AspectChatColumn
-          aspect="Analytical"
-          responses={getAspectResponses('Analytical')}
-          isLoading={isLoading}
-        />
-      </div>
-
-      {/* Input Area */}
-      <div className="bg-white/10 backdrop-blur-md border-t border-white/20 p-4">
-        <div className="flex space-x-3">
-          <input
-            type="text"
-            value={inputMessage}
-            onChange={(e) => setInputMessage(e.target.value)}
-            onKeyPress={handleKeyPress}
-            placeholder="Ask a question to get perspectives from all aspects..."
-            className="flex-1 bg-white/10 border border-white/20 rounded-lg px-4 py-3 text-white placeholder-white/50 focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-transparent disabled:opacity-50"
-            disabled={isLoading || !isOnline}
-          />
-          <button
-            onClick={handleSend}
-            disabled={!inputMessage.trim() || isLoading || !isOnline}
-            className="px-6 py-3 bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700 disabled:from-gray-500 disabled:to-gray-600 disabled:cursor-not-allowed rounded-lg transition-all duration-200 flex items-center space-x-2 min-w-[100px]"
-          >
-            {isLoading ? (
-              <>
-                <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                <span>Sending</span>
-              </>
-            ) : (
-              <>
-                <Send className="w-4 h-4" />
-                <span>Send</span>
-              </>
-            )}
-          </button>
-        </div>
-        
-        <div className="flex items-center justify-between mt-2 text-xs text-white/50">
-          <span>Press Enter to send, Shift+Enter for new line</span>
-          <span>{messages.filter(m => m.type === 'user').length} messages sent</span>
         </div>
       </div>
     </div>
