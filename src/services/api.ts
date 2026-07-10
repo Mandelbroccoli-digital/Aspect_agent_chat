@@ -32,7 +32,7 @@ class AspectAIAPI {
   private baseURL: string;
 
   constructor() {
-    this.baseURL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+    this.baseURL = (import.meta.env.VITE_API_URL as string) || 'http://localhost:8000';
   }
 
   async sendMessage(request: SendMessageRequest): Promise<ChatResponse> {
