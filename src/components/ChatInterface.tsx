@@ -14,12 +14,13 @@ export function ChatInterface() {
   const [isOnline, setIsOnline] = useState(true);
   const { theme } = useTheme();
   const currentTheme = themes[theme];
+  const apiUrl = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
 
   // Check backend connectivity
   React.useEffect(() => {
     const checkConnection = async () => {
       try {
-        const response = await fetch('http://localhost:8000/health');
+        const response = await fetch(`${apiUrl}/health`);
         setIsOnline(response.ok);
       } catch {
         setIsOnline(false);
@@ -29,7 +30,7 @@ export function ChatInterface() {
     checkConnection();
     const interval = setInterval(checkConnection, 30000);
     return () => clearInterval(interval);
-  }, []);
+  }, [apiUrl]);
 
   const handleSend = async () => {
     if (!inputMessage.trim() || isLoading) return;

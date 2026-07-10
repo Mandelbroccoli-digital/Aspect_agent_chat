@@ -1,5 +1,4 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { supabase } from '../services/supabase';
 import {
   orchestrateChat,
   saveUserMessage,
@@ -11,24 +10,16 @@ import type {
   ModelConfig,
   AspectConfig,
   ToolDefinition,
-  AspectResponse,
   ToolCallRecord,
+  ChatMessage,
 } from '../services/types';
 
-export interface ChatMessage {
-  id: string;
-  type: 'user' | 'aspects';
-  content: string;
-  timestamp: Date;
-  aspects?: AspectResponse[];
-}
-
 export function useAspectChat(
-  sessionId: string | null,
-  models: ModelConfig[],
-  aspects: AspectConfig[],
-  tools: ToolDefinition[],
-  toolCallingEnabled: boolean
+  sessionId: string | null = 'default',
+  models: ModelConfig[] = [],
+  aspects: AspectConfig[] = [],
+  tools: ToolDefinition[] = [],
+  toolCallingEnabled = false
 ) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -44,12 +35,15 @@ export function useAspectChat(
         const dbMessages = await getMessages(sessionId);
         const chatMsgs: ChatMessage[] = [];
         for (const msg of dbMessages) {
-          chatMsgs.push({
-            id: msg.id,
-            type: 'user',
-            content: msg.content,
-            timestamp: new Date(msg.created_at),
-          });
+          if (msg.role === 'user') {
+            chatMsgs.push({
+              id: msg.id,
+              type: 'user',
+              content: msg.content,
+              timestamp: new Date(msg.created_at),
+            });
+          }
+
           if (msg.aspect_responses && msg.aspect_responses.length > 0) {
             chatMsgs.push({
               id: `${msg.id}_aspects`,
@@ -90,10 +84,13 @@ export function useAspectChat(
         const enabledModels = models.filter((m) => m.enabled);
         const enabledTools = tools.filter((t) => t.enabled);
 
-        const history = messages.slice(-6).map((m) => ({
-          role: m.type === 'user' ? 'user' : 'assistant',
-          content: m.type === 'user' ? m.content : (m.aspects || []).map((a) => a.response).join(' '),
-        }));
+        const history = messages.slice(-6).map((m) => {
+          const role = m.type === 'user' ? 'user' : 'assistant';
+          return {
+            role,
+            content: m.type === 'user' ? m.content : (m.aspects || []).map((a) => a.response).join(' '),
+          } as const;
+        });
 
         const result = await orchestrateChat({
           message,
@@ -120,7 +117,7 @@ export function useAspectChat(
         );
 
         for (const tc of allToolCalls) {
-          await logToolCall(tc.tool, tc.input, tc.output, 'success', null);
+          await logToolCall(tc.tool, tc.input, tc.output, 'success', null, null);
         }
 
         const aspectMsg: ChatMessage = {
