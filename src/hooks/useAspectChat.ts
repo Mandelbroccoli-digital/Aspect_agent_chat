@@ -1,5 +1,19 @@
-import { useState, useCallback, useRef } from 'react';
-import { aspectAI, type AspectResponse, type ChatResponse } from '../services/api';
+import { useState, useCallback, useRef, useEffect } from 'react';
+import { supabase } from '../services/supabase';
+import {
+  orchestrateChat,
+  saveUserMessage,
+  saveAssistantMessage,
+  getMessages,
+  logToolCall,
+} from '../services/api';
+import type {
+  ModelConfig,
+  AspectConfig,
+  ToolDefinition,
+  AspectResponse,
+  ToolCallRecord,
+} from '../services/types';
 
 export interface ChatMessage {
   id: string;
@@ -9,101 +23,145 @@ export interface ChatMessage {
   aspects?: AspectResponse[];
 }
 
-export interface UseAspectChatReturn {
-  messages: ChatMessage[];
-  isLoading: boolean;
-  error: string | null;
-  sendMessage: (message: string) => Promise<void>;
-  clearChat: () => void;
-  sessionId: string;
-}
-
-export function useAspectChat(): UseAspectChatReturn {
+export function useAspectChat(
+  sessionId: string | null,
+  models: ModelConfig[],
+  aspects: AspectConfig[],
+  tools: ToolDefinition[],
+  toolCallingEnabled: boolean
+) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const sessionIdRef = useRef<string>(`session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`);
+  const loadedRef = useRef<string | null>(null);
 
-  const sendMessage = useCallback(async (message: string) => {
-    if (!message.trim() || isLoading) return;
+  useEffect(() => {
+    if (!sessionId || sessionId === loadedRef.current) return;
+    loadedRef.current = sessionId;
 
-    setIsLoading(true);
-    setError(null);
+    (async () => {
+      try {
+        const dbMessages = await getMessages(sessionId);
+        const chatMsgs: ChatMessage[] = [];
+        for (const msg of dbMessages) {
+          chatMsgs.push({
+            id: msg.id,
+            type: 'user',
+            content: msg.content,
+            timestamp: new Date(msg.created_at),
+          });
+          if (msg.aspect_responses && msg.aspect_responses.length > 0) {
+            chatMsgs.push({
+              id: `${msg.id}_aspects`,
+              type: 'aspects',
+              content: msg.content,
+              timestamp: new Date(msg.created_at),
+              aspects: msg.aspect_responses,
+            });
+          }
+        }
+        setMessages(chatMsgs);
+      } catch (err) {
+        console.error('Failed to load messages:', err);
+        setMessages([]);
+      }
+    })();
+  }, [sessionId]);
 
-    // Add user message immediately
-    const userMessage: ChatMessage = {
-      id: `user_${Date.now()}`,
-      type: 'user',
-      content: message,
-      timestamp: new Date(),
-    };
+  const sendMessage = useCallback(
+    async (message: string) => {
+      if (!message.trim() || isLoading || !sessionId) return;
 
-    setMessages(prev => [...prev, userMessage]);
+      setIsLoading(true);
+      setError(null);
 
-    try {
-      const response: ChatResponse = await aspectAI.sendMessage({
-        message,
-        session_id: sessionIdRef.current,
-        aspects: ['Logic', 'Creative', 'Analytical'],
-      });
-
-      // Add aspect responses
-      const aspectMessage: ChatMessage = {
-        id: response.message_id,
-        type: 'aspects',
-        content: message, // Original user message for context
-        timestamp: new Date(),
-        aspects: response.responses,
-      };
-
-      setMessages(prev => [...prev, aspectMessage]);
-    } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : 'An unknown error occurred';
-      setError(errorMessage);
-      
-      // Add error message to chat
-      const errorChatMessage: ChatMessage = {
-        id: `error_${Date.now()}`,
-        type: 'aspects',
+      const userMsg: ChatMessage = {
+        id: `user_${Date.now()}`,
+        type: 'user',
         content: message,
         timestamp: new Date(),
-        aspects: [
-          {
-            aspect: 'System',
-            response: `Error: ${errorMessage}. Please check that the backend server is running.`,
-            timestamp: new Date().toISOString(),
-            confidence: 0,
-          },
-        ],
       };
+      setMessages((prev) => [...prev, userMsg]);
 
-      setMessages(prev => [...prev, errorChatMessage]);
-    } finally {
-      setIsLoading(false);
-    }
-  }, [isLoading]);
+      try {
+        await saveUserMessage(sessionId, message);
 
-  const clearChat = useCallback(async () => {
-    try {
-      await aspectAI.clearSession(sessionIdRef.current);
-      setMessages([]);
-      setError(null);
-      // Generate new session ID
-      sessionIdRef.current = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    } catch (err) {
-      console.error('Failed to clear session:', err);
-      // Clear locally even if server request fails
-      setMessages([]);
-      setError(null);
-    }
+        const enabledAspects = aspects.filter((a) => a.enabled);
+        const enabledModels = models.filter((m) => m.enabled);
+        const enabledTools = tools.filter((t) => t.enabled);
+
+        const history = messages.slice(-6).map((m) => ({
+          role: m.type === 'user' ? 'user' : 'assistant',
+          content: m.type === 'user' ? m.content : (m.aspects || []).map((a) => a.response).join(' '),
+        }));
+
+        const result = await orchestrateChat({
+          message,
+          session_id: sessionId,
+          aspects: enabledAspects.map((a) => a.name),
+          history,
+          model_configs: enabledModels,
+          aspect_configs: enabledAspects,
+          tools: enabledTools,
+          tool_calling_enabled: toolCallingEnabled,
+        });
+
+        const allToolCalls: ToolCallRecord[] = [];
+        for (const resp of result.responses) {
+          allToolCalls.push(...(resp.tool_calls || []));
+        }
+
+        await saveAssistantMessage(
+          sessionId,
+          message,
+          result.responses,
+          result.responses.map((r) => r.model_used).join(', '),
+          allToolCalls
+        );
+
+        for (const tc of allToolCalls) {
+          await logToolCall(tc.tool, tc.input, tc.output, 'success', null);
+        }
+
+        const aspectMsg: ChatMessage = {
+          id: `aspects_${Date.now()}`,
+          type: 'aspects',
+          content: message,
+          timestamp: new Date(),
+          aspects: result.responses,
+        };
+        setMessages((prev) => [...prev, aspectMsg]);
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : 'Unknown error';
+        setError(errMsg);
+        const errorAspect: ChatMessage = {
+          id: `error_${Date.now()}`,
+          type: 'aspects',
+          content: message,
+          timestamp: new Date(),
+          aspects: [
+            {
+              aspect: 'System',
+              response: `Error: ${errMsg}`,
+              model_used: 'none',
+              tool_calls: [],
+              confidence: 0,
+              timestamp: new Date().toISOString(),
+            },
+          ],
+        };
+        setMessages((prev) => [...prev, errorAspect]);
+      } finally {
+        setIsLoading(false);
+      }
+    },
+    [isLoading, sessionId, models, aspects, tools, toolCallingEnabled, messages]
+  );
+
+  const clearChat = useCallback(() => {
+    setMessages([]);
+    setError(null);
   }, []);
 
-  return {
-    messages,
-    isLoading,
-    error,
-    sendMessage,
-    clearChat,
-    sessionId: sessionIdRef.current,
-  };
+  return { messages, isLoading, error, sendMessage, clearChat };
 }
