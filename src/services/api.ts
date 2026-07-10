@@ -1,226 +1,329 @@
+import { supabase } from './supabase';
 import type {
+  ModelConfig,
+  AspectConfig,
+  ToolDefinition,
+  Connection,
+  Session,
+  MessageRow,
+  AspectResponse,
+  ToolCallRecord,
+} from './types';
+
+export type {
   AspectResponse,
   ModelConfig,
   AspectConfig,
   ToolDefinition,
-  MessageRow,
   ToolCallRecord,
+  MessageRow,
+  Session,
+  Connection,
 } from './types';
 
-export type { AspectResponse, ModelConfig, AspectConfig, ToolDefinition, ToolCallRecord, MessageRow } from './types';
+const EDGE_URL = import.meta.env.VITE_SUPABASE_URL;
 
-export interface ChatResponse {
-  responses: AspectResponse[];
-  session_id: string;
-  message_id: string;
-}
-
-export interface SendMessageRequest {
-  message: string;
-  session_id: string;
-  aspects?: string[];
-  history?: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>;
-  model_configs?: ModelConfig[];
-  aspect_configs?: AspectConfig[];
-  tools?: ToolDefinition[];
-  tool_calling_enabled?: boolean;
-}
-
-const DEFAULT_BASE_URL = 'http://localhost:8000';
-const LOCAL_STORAGE_PREFIX = 'aspect_ai_chat_messages';
-
-function getBaseURL() {
-  return import.meta.env.VITE_API_URL ?? DEFAULT_BASE_URL;
-}
-
-function getLocalStorageKey(sessionId: string) {
-  return `${LOCAL_STORAGE_PREFIX}:${sessionId}`;
-}
-
-function loadLocalMessages(sessionId: string): MessageRow[] {
-  const raw = localStorage.getItem(getLocalStorageKey(sessionId));
-  if (!raw) {
-    return [];
-  }
-
-  try {
-    const parsed = JSON.parse(raw) as MessageRow[];
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
-function saveLocalMessages(sessionId: string, messages: MessageRow[]) {
-  localStorage.setItem(getLocalStorageKey(sessionId), JSON.stringify(messages));
-}
-
-function createMessageRow(overrides: Partial<MessageRow> & { session_id: string; role: 'user' | 'assistant' | 'system'; content: string }): MessageRow {
+function edgeHeaders(token: string | null) {
   return {
-    id: overrides.id ?? `msg_${Date.now()}_${Math.random().toString(16).slice(2)}`,
-    session_id: overrides.session_id,
-    user_id: overrides.user_id ?? 'local',
-    role: overrides.role,
-    content: overrides.content,
-    aspect_responses: overrides.aspect_responses ?? [],
-    model_used: overrides.model_used ?? null,
-    tool_calls: overrides.tool_calls ?? [],
-    created_at: overrides.created_at ?? new Date().toISOString(),
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${token || import.meta.env.VITE_SUPABASE_ANON_KEY}`,
+    apikey: import.meta.env.VITE_SUPABASE_ANON_KEY,
   };
 }
 
-class AspectAIAPI {
-  private baseURL: string;
+// ── Sessions ──
 
-  constructor() {
-    this.baseURL = getBaseURL();
-  }
-
-  async sendMessage(request: SendMessageRequest): Promise<ChatResponse> {
-    const response = await fetch(`${this.baseURL}/api/message`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(request),
-    });
-
-    if (!response.ok) {
-      throw new Error(`API request failed: ${response.status} ${response.statusText}`);
-    }
-
-    return response.json();
-  }
-
-  async getSessionHistory(sessionId: string): Promise<{ session_id: string; history: Array<{ user_message: string; responses: Record<string, string>; timestamp: string }> }> {
-    const response = await fetch(`${this.baseURL}/api/session/${sessionId}`);
-
-    if (!response.ok) {
-      throw new Error(`Failed to get session history: ${response.status}`);
-    }
-
-    return response.json();
-  }
-
-  async clearSession(sessionId: string): Promise<void> {
-    const response = await fetch(`${this.baseURL}/api/session/${sessionId}`, {
-      method: 'DELETE',
-    });
-
-    if (!response.ok) {
-      throw new Error(`Failed to clear session: ${response.status}`);
-    }
-  }
-
-  async healthCheck(): Promise<{
-    status: string;
-    models_status: Record<string, string>;
-    cuda_available: boolean;
-  }> {
-    const response = await fetch(`${this.baseURL}/health`);
-
-    if (!response.ok) {
-      throw new Error(`Health check failed: ${response.status}`);
-    }
-
-    return response.json();
-  }
+export async function createSession(title = 'New Session'): Promise<Session> {
+  const { data, error } = await supabase.from('sessions').insert({ title }).select().single();
+  if (error) throw error;
+  return data;
 }
 
-const remoteAPI = new AspectAIAPI();
-
-function localOrchestrateChat(request: SendMessageRequest): ChatResponse {
-  const now = new Date().toISOString();
-  const aspectNames = request.aspects?.length ? request.aspects : ['Logic', 'Creative', 'Analytical'];
-
-  return {
-    session_id: request.session_id,
-    message_id: `local_${Date.now()}`,
-    responses: aspectNames.map((aspect) => ({
-      aspect,
-      response: `Local fallback response for "${request.message}" from the ${aspect} aspect.`,
-      model_used: 'local-fallback',
-      tool_calls: [],
-      confidence: 0.65,
-      timestamp: now,
-    })),
-  };
+export async function getSessions(): Promise<Session[]> {
+  const { data, error } = await supabase
+    .from('sessions')
+    .select('*')
+    .order('updated_at', { ascending: false });
+  if (error) throw error;
+  return data || [];
 }
 
-export async function orchestrateChat(request: SendMessageRequest): Promise<ChatResponse> {
-  try {
-    return await remoteAPI.sendMessage(request);
-  } catch (err) {
-    console.warn('Remote orchestration request failed, using local fallback:', err);
-    return localOrchestrateChat(request);
-  }
+export async function deleteSession(id: string): Promise<void> {
+  const { error } = await supabase.from('sessions').delete().eq('id', id);
+  if (error) throw error;
 }
 
-export async function saveUserMessage(sessionId: string, message: string): Promise<void> {
-  const messages = loadLocalMessages(sessionId);
-  messages.push(createMessageRow({ session_id: sessionId, role: 'user', content: message }));
-  saveLocalMessages(sessionId, messages);
+export async function renameSession(id: string, title: string): Promise<void> {
+  const { error } = await supabase.from('sessions').update({ title }).eq('id', id);
+  if (error) throw error;
+}
+
+// ── Messages ──
+
+export async function getMessages(sessionId: string): Promise<MessageRow[]> {
+  const { data, error } = await supabase
+    .from('messages')
+    .select('*')
+    .eq('session_id', sessionId)
+    .order('created_at', { ascending: true });
+  if (error) throw error;
+  return data || [];
+}
+
+export async function saveUserMessage(sessionId: string, content: string): Promise<MessageRow> {
+  const { data, error } = await supabase
+    .from('messages')
+    .insert({ session_id: sessionId, role: 'user', content })
+    .select()
+    .single();
+  if (error) throw error;
+  return data;
 }
 
 export async function saveAssistantMessage(
   sessionId: string,
-  userMessage: string,
-  responses: AspectResponse[],
+  content: string,
+  aspectResponses: AspectResponse[],
   modelUsed: string,
-  toolCalls: ToolCallRecord[] = []
-): Promise<void> {
-  const messages = loadLocalMessages(sessionId);
-  messages.push(
-    createMessageRow({
+  toolCalls: ToolCallRecord[]
+): Promise<MessageRow> {
+  const { data, error } = await supabase
+    .from('messages')
+    .insert({
       session_id: sessionId,
       role: 'assistant',
-      content: userMessage,
-      aspect_responses: responses,
+      content,
+      aspect_responses: aspectResponses,
       model_used: modelUsed,
       tool_calls: toolCalls,
     })
-  );
-  saveLocalMessages(sessionId, messages);
+    .select()
+    .single();
+  if (error) throw error;
+  return data;
 }
 
-export async function getMessages(sessionId: string): Promise<MessageRow[]> {
-  try {
-    const sessionHistory = await remoteAPI.getSessionHistory(sessionId);
-    return sessionHistory.history.map((entry) => ({
-      id: `history_${entry.timestamp}`,
-      session_id: sessionId,
-      user_id: 'remote',
-      role: 'assistant',
-      content: entry.user_message,
-      aspect_responses: Object.entries(entry.responses).map(([aspect, response]) => ({
-        aspect,
-        response,
-        model_used: 'remote',
-        tool_calls: [],
-        confidence: 0.6,
-        timestamp: entry.timestamp,
-      })),
-      model_used: null,
-      tool_calls: [],
-      created_at: entry.timestamp,
-    }));
-  } catch {
-    return loadLocalMessages(sessionId);
-  }
+// ── Model Configs ──
+
+export async function getModelConfigs(): Promise<ModelConfig[]> {
+  const { data, error } = await supabase
+    .from('model_configs')
+    .select('*')
+    .order('sort_order', { ascending: true });
+  if (error) throw error;
+  return data || [];
 }
+
+export async function createModelConfig(
+  config: Omit<ModelConfig, 'id' | 'user_id' | 'created_at'>
+): Promise<ModelConfig> {
+  const { data, error } = await supabase
+    .from('model_configs')
+    .insert(config)
+    .select()
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+export async function updateModelConfig(
+  id: string,
+  updates: Partial<ModelConfig>
+): Promise<void> {
+  const { error } = await supabase.from('model_configs').update(updates).eq('id', id);
+  if (error) throw error;
+}
+
+export async function deleteModelConfig(id: string): Promise<void> {
+  const { error } = await supabase.from('model_configs').delete().eq('id', id);
+  if (error) throw error;
+}
+
+// ── Aspects ──
+
+export async function getAspects(): Promise<AspectConfig[]> {
+  const { data, error } = await supabase
+    .from('aspects')
+    .select('*')
+    .order('sort_order', { ascending: true });
+  if (error) throw error;
+  return data || [];
+}
+
+export async function createAspect(
+  aspect: Omit<AspectConfig, 'id' | 'user_id' | 'created_at'>
+): Promise<AspectConfig> {
+  const { data, error } = await supabase
+    .from('aspects')
+    .insert(aspect)
+    .select()
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+export async function updateAspect(id: string, updates: Partial<AspectConfig>): Promise<void> {
+  const { error } = await supabase.from('aspects').update(updates).eq('id', id);
+  if (error) throw error;
+}
+
+export async function deleteAspect(id: string): Promise<void> {
+  const { error } = await supabase.from('aspects').delete().eq('id', id);
+  if (error) throw error;
+}
+
+// ── Tools ──
+
+export async function getToolDefinitions(): Promise<ToolDefinition[]> {
+  const { data, error } = await supabase
+    .from('tool_definitions')
+    .select('*')
+    .order('name', { ascending: true });
+  if (error) throw error;
+  return data || [];
+}
+
+export async function updateToolDefinition(
+  id: string,
+  updates: Partial<ToolDefinition>
+): Promise<void> {
+  const { error } = await supabase.from('tool_definitions').update(updates).eq('id', id);
+  if (error) throw error;
+}
+
+export async function createToolDefinition(
+  tool: Omit<ToolDefinition, 'id' | 'user_id' | 'created_at'>
+): Promise<ToolDefinition> {
+  const { data, error } = await supabase
+    .from('tool_definitions')
+    .insert(tool)
+    .select()
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+export async function deleteToolDefinition(id: string): Promise<void> {
+  const { error } = await supabase.from('tool_definitions').delete().eq('id', id);
+  if (error) throw error;
+}
+
+// ── Connections ──
+
+export async function getConnections(): Promise<Connection[]> {
+  const { data, error } = await supabase
+    .from('connections')
+    .select('*')
+    .order('created_at', { ascending: false });
+  if (error) throw error;
+  return data || [];
+}
+
+export async function createConnection(
+  conn: Omit<Connection, 'id' | 'user_id' | 'created_at'>
+): Promise<Connection> {
+  const { data, error } = await supabase
+    .from('connections')
+    .insert(conn)
+    .select()
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+export async function updateConnection(id: string, updates: Partial<Connection>): Promise<void> {
+  const { error } = await supabase.from('connections').update(updates).eq('id', id);
+  if (error) throw error;
+}
+
+export async function deleteConnection(id: string): Promise<void> {
+  const { error } = await supabase.from('connections').delete().eq('id', id);
+  if (error) throw error;
+}
+
+// ── Tool Call Logs ──
 
 export async function logToolCall(
-  _tool: string,
-  _input: Record<string, unknown>,
-  _output: unknown,
-  _status: 'pending' | 'running' | 'success' | 'error',
-  _duration_ms: number | null,
-  _messageId: string | null = null
+  toolName: string,
+  input: Record<string, unknown>,
+  output: unknown,
+  status: string,
+  durationMs: number | null
 ): Promise<void> {
-  // Local fallback does not persist per-message tool call metadata.
-  return;
+  await supabase.from('tool_call_logs').insert({
+    tool_name: toolName,
+    input,
+    output,
+    status,
+    duration_ms: durationMs,
+  });
 }
 
+// ── Chat Orchestration ──
+
+export interface ChatOrchestrationRequest {
+  message: string;
+  session_id: string;
+  aspects: string[];
+  history: { role: string; content: string }[];
+  model_configs: ModelConfig[];
+  aspect_configs: AspectConfig[];
+  tools: ToolDefinition[];
+  tool_calling_enabled: boolean;
+}
+
+export interface ChatOrchestrationResponse {
+  responses: AspectResponse[];
+}
+
+export async function orchestrateChat(
+  request: ChatOrchestrationRequest
+): Promise<ChatOrchestrationResponse> {
+  const { data: session } = await supabase.auth.getSession();
+  const token = session.session?.access_token || null;
+
+  const response = await fetch(`${EDGE_URL}/functions/v1/chat-orchestrator`, {
+    method: 'POST',
+    headers: edgeHeaders(token),
+    body: JSON.stringify(request),
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`Chat orchestration failed (${response.status}): ${errText}`);
+  }
+
+  const data = await response.json();
+  if (data.error) throw new Error(data.error);
+  return data;
+}
+
+// ── Tool Execution ──
+
+export async function executeTool(
+  toolName: string,
+  input: Record<string, unknown>
+): Promise<unknown> {
+  const { data: session } = await supabase.auth.getSession();
+  const token = session.session?.access_token || null;
+
+  const response = await fetch(`${EDGE_URL}/functions/v1/tool-executor`, {
+    method: 'POST',
+    headers: edgeHeaders(token),
+    body: JSON.stringify({ tool_name: toolName, input }),
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`Tool execution failed (${response.status}): ${errText}`);
+  }
+
+  return response.json();
+}
+
+// ── User Defaults Seeding ──
+
 export async function seedUserDefaults(): Promise<void> {
-  return;
+  const { error } = await supabase.rpc('seed_user_defaults');
+  if (error) throw error;
 }

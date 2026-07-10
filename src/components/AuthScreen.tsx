@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { useAuth } from '../hooks/useAuth';
 import { Brain, Loader as Loader2, Mail, Lock, CircleAlert as AlertCircle } from 'lucide-react';
 

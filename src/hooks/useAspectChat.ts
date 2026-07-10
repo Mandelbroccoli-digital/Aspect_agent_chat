@@ -15,16 +15,21 @@ import type {
 } from '../services/types';
 
 export function useAspectChat(
-  sessionId: string | null = 'default',
-  models: ModelConfig[] = [],
-  aspects: AspectConfig[] = [],
-  tools: ToolDefinition[] = [],
-  toolCallingEnabled = false
+  sessionId: string | null,
+  models: ModelConfig[],
+  aspects: AspectConfig[],
+  tools: ToolDefinition[],
+  toolCallingEnabled: boolean
 ) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const loadedRef = useRef<string | null>(null);
+  const messagesRef = useRef<ChatMessage[]>([]);
+
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
 
   useEffect(() => {
     if (!sessionId || sessionId === loadedRef.current) return;
@@ -43,7 +48,6 @@ export function useAspectChat(
               timestamp: new Date(msg.created_at),
             });
           }
-
           if (msg.aspect_responses && msg.aspect_responses.length > 0) {
             chatMsgs.push({
               id: `${msg.id}_aspects`,
@@ -75,6 +79,8 @@ export function useAspectChat(
         content: message,
         timestamp: new Date(),
       };
+
+      const currentMessages = messagesRef.current;
       setMessages((prev) => [...prev, userMsg]);
 
       try {
@@ -84,12 +90,12 @@ export function useAspectChat(
         const enabledModels = models.filter((m) => m.enabled);
         const enabledTools = tools.filter((t) => t.enabled);
 
-        const history = messages.slice(-6).map((m) => {
+        const history = currentMessages.slice(-6).map((m) => {
           const role = m.type === 'user' ? 'user' : 'assistant';
           return {
             role,
             content: m.type === 'user' ? m.content : (m.aspects || []).map((a) => a.response).join(' '),
-          } as const;
+          };
         });
 
         const result = await orchestrateChat({
@@ -117,7 +123,7 @@ export function useAspectChat(
         );
 
         for (const tc of allToolCalls) {
-          await logToolCall(tc.tool, tc.input, tc.output, 'success', null, null);
+          await logToolCall(tc.tool, tc.input, tc.output, 'success', null);
         }
 
         const aspectMsg: ChatMessage = {
@@ -152,12 +158,13 @@ export function useAspectChat(
         setIsLoading(false);
       }
     },
-    [isLoading, sessionId, models, aspects, tools, toolCallingEnabled, messages]
+    [isLoading, sessionId, models, aspects, tools, toolCallingEnabled]
   );
 
   const clearChat = useCallback(() => {
     setMessages([]);
     setError(null);
+    loadedRef.current = null;
   }, []);
 
   return { messages, isLoading, error, sendMessage, clearChat };

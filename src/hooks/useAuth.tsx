@@ -46,15 +46,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const signUp = async (email: string, password: string) => {
-    const { data, error } = await supabase.auth.signUp({ email, password });
+    const { error } = await supabase.auth.signUp({ email, password });
     if (error) throw error;
-    if (data.user) {
-      try {
-        await seedUserDefaults();
-      } catch (err) {
-        console.error('Failed to seed user defaults:', err);
-      }
-    }
+    // Seeding happens on SIGNED_IN event in onAuthStateChange
   };
 
   const signIn = async (email: string, password: string) => {

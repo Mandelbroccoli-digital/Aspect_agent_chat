@@ -3,21 +3,27 @@
 @tailwind utilities;
 
 * {
-  @apply transition-colors;
+  box-sizing: border-box;
 }
 
 body {
-  @apply m-0 p-0;
+  margin: 0;
+  padding: 0;
 }
 
 ::-webkit-scrollbar {
-  @apply w-2;
+  width: 6px;
 }
 
 ::-webkit-scrollbar-track {
-  @apply bg-transparent;
+  background: transparent;
 }
 
 ::-webkit-scrollbar-thumb {
-  @apply bg-gray-600 rounded-full hover:bg-gray-500;
+  background: #475569;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #64748b;
 }
